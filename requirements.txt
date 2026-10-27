@@ -1,0 +1,6 @@
+streamlit>=1.50
+plotly>=5.18
+numpy>=1.26
+# for fd_encode_server.py
+torch>=2.0
+transformers>=4.40
