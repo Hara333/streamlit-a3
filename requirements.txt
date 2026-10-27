@@ -4,3 +4,5 @@ plotly>=5.18
 numpy>=1.26
 torch>=2.0
 transformers>=4.40
+pandas>=2.0
+openpyxl>=3.1

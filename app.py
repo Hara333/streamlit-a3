@@ -8,10 +8,12 @@ Run:
 bge-large turns the sentence into 2,048 features (loaded in the app, downloaded on first run);
 the chosen head from model.pkl turns those into negative / neutral / positive.
 """
+import io
 import pickle
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 import torch
@@ -62,13 +64,35 @@ def load_encoder():
 
 
 def encode(sentence):
-    """The [CLS] vector (1,024) then the mean over the tokens (1,024), same as fd_encode_server.py."""
+    """The [CLS] vector (1,024) then the mean over the tokens (1,024), same as fd_encode_server.py.
+
+    Also returns the tokens and each token's own 1,024-number vector."""
     tok, model = load_encoder()
     enc = tok(sentence, truncation=True, max_length=512, return_tensors="pt")
     with torch.no_grad():
         h = model(**enc).last_hidden_state[0]
     mask = enc["attention_mask"][0].unsqueeze(-1).float()
-    return torch.cat([h[0], (h * mask).sum(0) / mask.sum()]).numpy().astype(np.float64)
+    x = torch.cat([h[0], (h * mask).sum(0) / mask.sum()]).numpy().astype(np.float64)
+    tokens = tok.convert_ids_to_tokens(enc["input_ids"][0])
+    return x, tokens, h.numpy().astype(np.float64)
+
+
+def to_excel(res):
+    """One workbook: the prediction, the 2,048-number sentence vector and every token's vector."""
+    x, half = res["x"], len(res["x"]) // 2
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as xl:
+        pd.DataFrame({"sentence": [res["sentence"]], "model": [res["model"]], "label": [res["label"]],
+                      **{f"p_{c}": [p] for c, p in zip(CLS, res["probs"])}}
+                     ).to_excel(xl, sheet_name="prediction", index=False)
+        pd.DataFrame({"position": np.arange(len(x)),
+                      "part": ["[CLS] vector"] * half + ["token average"] * (len(x) - half),
+                      "value": x}).to_excel(xl, sheet_name="sentence_vector", index=False)
+        tv = pd.DataFrame(res["token_vecs"], columns=[f"d{i}" for i in range(res["token_vecs"].shape[1])])
+        tv.insert(0, "token", res["tokens"])
+        tv.insert(0, "position", np.arange(len(res["tokens"])))
+        tv.to_excel(xl, sheet_name="token_vectors", index=False)
+    return buf.getvalue()
 
 
 # ---------- page ----------
@@ -87,11 +111,12 @@ if st.button("Predict", type="primary"):
         st.warning("Type a sentence first.")
     else:
         with st.spinner("Encoding with bge-large (the first run downloads it, about 1.3 GB) ..."):
-            x = encode(sentence)
+            x, tokens, token_vecs = encode(sentence)
         probs = run_head(heads[model_name], x)
         # keep the result in session state so it survives reruns from other widgets
         st.session_state["prediction"] = {"sentence": sentence, "model": model_name, "probs": probs,
-                                          "label": CLS[probs.index(max(probs))], "x": x}
+                                          "label": CLS[probs.index(max(probs))], "x": x,
+                                          "tokens": tokens, "token_vecs": token_vecs}
 
 res = st.session_state.get("prediction")
 if res:
@@ -128,3 +153,30 @@ if res:
         st.dataframe({"position": np.arange(len(x)),
                       "part": ["[CLS] vector"] * half + ["token average"] * (len(x) - half),
                       "value": np.round(x, 5)}, hide_index=True, width="stretch")
+
+    # ---------- one 1,024-number vector per token ----------
+    tokens, tv = res["tokens"], res["token_vecs"]
+    st.subheader(f"Token vectors ({len(tokens)} tokens × {tv.shape[1]:,} numbers)")
+    st.caption("bge-large gives every token its own vector. Words it doesn't know whole are split into "
+               "pieces (a piece starting with ## continues the word before it). [CLS] and [SEP] mark the "
+               "start and end; the [CLS] row is the first half of the sentence vector, and the average of "
+               "all rows is the second half.")
+    labels = [f"{i}: {t}" for i, t in enumerate(tokens)]
+    lim = float(np.abs(tv).max())
+    hfig = go.Figure(go.Heatmap(z=tv, y=labels, colorscale="RdBu", zmid=0, zmin=-lim, zmax=lim,
+                                colorbar=dict(title="value"),
+                                hovertemplate="%{y}<br>position %{x}<br>value %{z:.4f}<extra></extra>"))
+    hfig.update_layout(height=max(220, 26 * len(tokens) + 60), margin=dict(l=10, r=10, t=10, b=10),
+                       xaxis_title="position in token vector", yaxis=dict(autorange="reversed"))
+    st.plotly_chart(hfig, width="stretch")
+
+    pick = st.selectbox("Look at one token", labels)
+    row = tv[labels.index(pick)]
+    tfig = go.Figure(go.Bar(x=np.arange(len(row)), y=row, marker_color="#3b82f6"))
+    tfig.update_layout(height=240, margin=dict(l=10, r=10, t=10, b=10), bargap=0,
+                       xaxis_title="position in token vector", yaxis_title="value")
+    st.plotly_chart(tfig, width="stretch")
+
+    st.download_button("Download as Excel", to_excel(res), file_name="sentence_vectors.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                       icon=":material/download:")
