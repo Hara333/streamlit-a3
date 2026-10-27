@@ -91,7 +91,7 @@ if st.button("Predict", type="primary"):
         probs = run_head(heads[model_name], x)
         # keep the result in session state so it survives reruns from other widgets
         st.session_state["prediction"] = {"sentence": sentence, "model": model_name, "probs": probs,
-                                          "label": CLS[probs.index(max(probs))]}
+                                          "label": CLS[probs.index(max(probs))], "x": x}
 
 res = st.session_state.get("prediction")
 if res:
@@ -105,3 +105,26 @@ if res:
     fig.update_layout(height=200, margin=dict(l=10, r=40, t=10, b=10),
                       xaxis=dict(range=[0, 1.1], tickformat=".0%"), yaxis=dict(autorange="reversed"))
     st.plotly_chart(fig, width="stretch")
+
+    # ---------- the 2,048 features the head read ----------
+    x = res["x"]
+    half = len(x) // 2
+    st.subheader(f"Sentence vector ({len(x):,} numbers)")
+    st.caption(f"bge-large's [CLS] vector (values 0 to {half - 1}) followed by the average of all "
+               f"token vectors (values {half} to {len(x) - 1}). The head turns these into the 3 "
+               "probabilities above.")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Min", f"{x.min():.3f}")
+    c2.metric("Mean", f"{x.mean():.3f}")
+    c3.metric("Max", f"{x.max():.3f}")
+    vfig = go.Figure([go.Bar(x=np.arange(half), y=x[:half], name="[CLS] vector", marker_color="#3b82f6"),
+                      go.Bar(x=np.arange(half, len(x)), y=x[half:], name="token average",
+                             marker_color="#f59e0b")])
+    vfig.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=10), bargap=0,
+                       xaxis_title="position in vector", yaxis_title="value",
+                       legend=dict(orientation="h", y=1.1))
+    st.plotly_chart(vfig, width="stretch")
+    with st.expander("All 2,048 values"):
+        st.dataframe({"position": np.arange(len(x)),
+                      "part": ["[CLS] vector"] * half + ["token average"] * (len(x) - half),
+                      "value": np.round(x, 5)}, hide_index=True, width="stretch")
