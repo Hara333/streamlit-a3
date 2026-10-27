@@ -3,25 +3,23 @@
 Run:
     pip install -r requirements.txt
     python train_model.py           # builds model.pkl from the model pages
-    python fd_encode_server.py      # the bge-large encoder at 127.0.0.1:8765
     streamlit run app.py
 
-The encoder turns the sentence into 2,048 features; the chosen head from model.pkl turns
-those into negative / neutral / positive.
+bge-large turns the sentence into 2,048 features (loaded in the app, downloaded on first run);
+the chosen head from model.pkl turns those into negative / neutral / positive.
 """
-import json
 import pickle
-import urllib.parse
-import urllib.request
 from pathlib import Path
 
 import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
+import torch
+from transformers import AutoModel, AutoTokenizer
 
 st.set_page_config(page_title="Sentiment prediction", page_icon="💬")
 HERE = Path(__file__).resolve().parent
-ENC_URL = "http://127.0.0.1:8765"
+ENC_NAME = "BAAI/bge-large-en-v1.5"
 
 CLS = ["negative", "neutral", "positive"]
 CLS_COL = ["#e5484d", "#8b5cf6", "#1f9d55"]
@@ -58,10 +56,19 @@ def run_head(h, x):
     return [float(by_label[c]) for c in CLS]
 
 
+@st.cache_resource
+def load_encoder():
+    return AutoTokenizer.from_pretrained(ENC_NAME), AutoModel.from_pretrained(ENC_NAME).eval()
+
+
 def encode(sentence):
-    url = f"{ENC_URL}/encode?text={urllib.parse.quote(sentence)}"
-    with urllib.request.urlopen(url, timeout=90) as r:
-        return np.array(json.loads(r.read())["values"], dtype=np.float64)
+    """The [CLS] vector (1,024) then the mean over the tokens (1,024), same as fd_encode_server.py."""
+    tok, model = load_encoder()
+    enc = tok(sentence, truncation=True, max_length=512, return_tensors="pt")
+    with torch.no_grad():
+        h = model(**enc).last_hidden_state[0]
+    mask = enc["attention_mask"][0].unsqueeze(-1).float()
+    return torch.cat([h[0], (h * mask).sum(0) / mask.sum()]).numpy().astype(np.float64)
 
 
 # ---------- page ----------
@@ -79,16 +86,12 @@ if st.button("Predict", type="primary"):
     if not sentence.strip():
         st.warning("Type a sentence first.")
     else:
-        try:
-            with st.spinner("Encoding with bge-large ..."):
-                x = encode(sentence)
-        except OSError:
-            st.error(f"Encoder offline. Start fd_encode_server.py so it answers at {ENC_URL}.")
-        else:
-            probs = run_head(heads[model_name], x)
-            # keep the result in session state so it survives reruns from other widgets
-            st.session_state["prediction"] = {"sentence": sentence, "model": model_name, "probs": probs,
-                                              "label": CLS[probs.index(max(probs))]}
+        with st.spinner("Encoding with bge-large (the first run downloads it, about 1.3 GB) ..."):
+            x = encode(sentence)
+        probs = run_head(heads[model_name], x)
+        # keep the result in session state so it survives reruns from other widgets
+        st.session_state["prediction"] = {"sentence": sentence, "model": model_name, "probs": probs,
+                                          "label": CLS[probs.index(max(probs))]}
 
 res = st.session_state.get("prediction")
 if res:
